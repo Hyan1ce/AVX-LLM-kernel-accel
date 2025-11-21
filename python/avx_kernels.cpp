@@ -77,6 +77,7 @@ std::vector<torch::Tensor> layernorm_avx_backward(
     torch::Tensor grad_output,
     torch::Tensor input,
     torch::Tensor gamma,
+    torch::Tensor beta,
     torch::Tensor mean,
     torch::Tensor var,
     float eps = 1e-5f,
@@ -129,7 +130,7 @@ torch::Tensor softmax_avx_forward(
     return output;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+PYBIND11_MODULE(avx_kernels_cpp, m) {
     m.def("gemm_forward", &gemm_avx_forward, "GEMM AVX forward",
           py::arg("A"), py::arg("B"), py::arg("C") = torch::Tensor(),
           py::arg("alpha") = 1.0f, py::arg("beta") = 0.0f,
@@ -141,8 +142,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     
     m.def("layernorm_backward", &layernorm_avx_backward, "LayerNorm AVX backward",
           py::arg("grad_output"), py::arg("input"), py::arg("gamma"),
-          py::arg("mean"), py::arg("var"), py::arg("eps") = 1e-5f,
-          py::arg("use_parallel") = true);
+          py::arg("beta"), py::arg("mean"), py::arg("var"), 
+          py::arg("eps") = 1e-5f, py::arg("use_parallel") = true);
     
     m.def("softmax_forward", &softmax_avx_forward, "Softmax AVX forward",
           py::arg("input"), py::arg("use_parallel") = true);

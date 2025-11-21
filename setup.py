@@ -4,13 +4,17 @@ from pybind11 import get_cmake_dir
 import pybind11
 import torch
 import os
+import glob
 
 # Get include directories
-torch_include = torch.utils.cpp_extension.include_paths()
+torch_include = [
+    torch.__path__[0] + '/include',
+    torch.__path__[0] + '/include/torch/csrc/api/include',
+]
 pybind11_include = pybind11.get_include()
 
 # Get library directories
-torch_lib = torch.utils.cpp_extension.library_paths()
+torch_lib = [torch.__path__[0] + '/lib']
 
 ext_modules = [
     Pybind11Extension(
@@ -28,7 +32,7 @@ ext_modules = [
             "kernels/layernorm",
             "kernels/softmax",
         ] + torch_include + [pybind11_include],
-        libraries=["torch", "torch_cpu", "c10"],
+        libraries=["torch", "torch_cpu", "torch_python", "c10"],
         library_dirs=torch_lib,
         language='c++',
         cxx_std=17,
@@ -39,8 +43,12 @@ ext_modules = [
             '-fopenmp',
             '-Wall',
             '-Wextra',
+            f'-D_GLIBCXX_USE_CXX11_ABI={1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0}',
         ],
-        extra_link_args=['-fopenmp'],
+        extra_link_args=[
+            '-fopenmp',
+            '-Wl,-rpath,' + torch.__path__[0] + '/lib',
+        ],
     ),
 ]
 

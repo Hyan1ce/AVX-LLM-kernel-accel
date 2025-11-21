@@ -4,6 +4,7 @@
 #include <immintrin.h>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 
 // AVX feature detection
 inline bool has_avx2() {
@@ -44,16 +45,14 @@ inline void storeu_8_float(float* ptr, __m256 val) {
     _mm256_storeu_ps(ptr, val);
 }
 
-// Horizontal sum of 8 floats
+// Horizontal sum of 8 floats - Simplified and robust version using hadd
 inline float horizontal_sum_8(__m256 v) {
-    __m128 vlow = _mm256_extractf128_ps(v, 0);
+    __m128 vlow = _mm256_castps256_ps128(v);
     __m128 vhigh = _mm256_extractf128_ps(v, 1);
     vlow = _mm_add_ps(vlow, vhigh);
-    __m128 shuf = _mm_shuffle_ps(vlow, vlow, _MM_SHUFFLE(2, 3, 0, 1));
-    __m128 sums = _mm_add_ps(vlow, shuf);
-    shuf = _mm_movehdup_ps(sums);
-    sums = _mm_add_ss(sums, shuf);
-    return _mm_cvtss_f32(sums);
+    vlow = _mm_hadd_ps(vlow, vlow);
+    vlow = _mm_hadd_ps(vlow, vlow);
+    return _mm_cvtss_f32(vlow);
 }
 
 // Horizontal max of 8 floats
@@ -69,4 +68,3 @@ inline float horizontal_max_8(__m256 v) {
 }
 
 #endif // AVX_UTILS_H
-

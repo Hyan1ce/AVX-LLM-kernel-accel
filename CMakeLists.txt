@@ -38,8 +38,9 @@ if(OpenMP_CXX_FOUND)
     link_libraries(${OpenMP_CXX_LIBRARIES})
 endif()
 
-# Test executable (optional)
-add_executable(test_gemm test_gemm.cpp)
-target_link_libraries(test_gemm ${OpenMP_CXX_LIBRARIES})
-target_sources(test_gemm PRIVATE ${GEMM_SOURCES})
+# Test executable (optional - commented out as test_gemm.cpp doesn't exist)
+# Uncomment and create test_gemm.cpp if you want to build a standalone test
+# add_executable(test_gemm test_gemm.cpp)
+# target_link_libraries(test_gemm ${OpenMP_CXX_LIBRARIES})
+# target_sources(test_gemm PRIVATE ${GEMM_SOURCES})
 

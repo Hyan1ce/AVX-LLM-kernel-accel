@@ -4,15 +4,14 @@
 
 ## 项目概述
 
-本项目实现了三个关键kernel的AVX优化版本：
-- **GEMM** (General Matrix Multiply): 矩阵乘法核心操作
-- **LayerNorm**: 层归一化（包含forward和backward）
-- **Softmax**: 注意力机制中的softmax操作
+本项目实现了三个关键kernel的 **CPU 优化版本**，在支持 AVX2 的 CPU 上配合 OpenMP 可以获得显著加速：
+- **GEMM** (General Matrix Multiply): 矩阵乘法核心操作（显式使用 AVX2 intrinsics）
+- **LayerNorm**: 层归一化（包含 forward 和 backward，使用数值稳定的两遍算法 + OpenMP，并在 backward 中使用 AVX2 intrinsics）
+- **Softmax**: 注意力机制中的 softmax 操作（数值稳定实现 + OpenMP）
 
-所有kernel都提供了：
-- 标量实现（baseline）
-- AVX2优化实现（单线程）
-- AVX2优化实现（多线程并行）
+所有 kernel 至少提供：
+- **标量实现（baseline）**
+- **基于 OpenMP 的多线程实现**（在开启 `-mavx2 -O3` 时由编译器自动向量化，结合 AVX2 指令）
 
 ## 项目结构
 
@@ -70,34 +69,35 @@ AVX-LLM-kernel-accel/
 - GCC/G++ 7+ (支持C++17和AVX2)
 - CMake 3.18+ (可选，用于CMake构建)
 
-### 安装依赖
+### 安装依赖（推荐使用 conda 环境）
 
 ```bash
-# 安装PyTorch (CPU版本)
-pip install torch
+# 创建并激活环境（示例）
+conda create -n avx-llm-kernel python=3.9 -y
+conda activate avx-llm-kernel
 
-# 安装pybind11
-pip install pybind11
+# 安装 Python 依赖
+pip install -r requirements.txt
 
-# 安装OpenMP (Ubuntu/Debian)
-sudo apt-get install libomp-dev
-
-# 安装OpenMP (macOS)
-brew install libomp
+# 如果系统缺少 OpenMP（部分 Linux/macOS）
+# Ubuntu/Debian:
+#   sudo apt-get install libomp-dev
+# macOS (Homebrew):
+#   brew install libomp
 ```
 
 ## 编译和安装
 
-### 方法1: 使用setup.py (推荐)
+### 方法1: 使用 setup.py 构建 PyTorch 扩展（推荐）
 
 ```bash
 # 进入项目目录
 cd AVX-LLM-kernel-accel
 
-# 编译并安装Python扩展
+# 编译并在当前目录生成 avx_kernels_cpp*.so
 python setup.py build_ext --inplace
 
-# 或者安装到系统
+# （可选）以开发模式安装
 pip install -e .
 ```
 
@@ -116,14 +116,20 @@ make -j$(nproc)
 首先验证kernel的正确性：
 
 ```bash
-# 测试GEMM
+# 确认当前在项目根目录
+cd AVX-LLM-kernel-accel
+conda activate avx-llm-kernel  # 或者你自己的环境名
+
+# 测试 GEMM（默认使用 AVX + OpenMP 实现）
 python tests/test_gemm.py
 
-# 测试LayerNorm
+# 测试 LayerNorm / Softmax（默认使用 PyTorch 实现，保证数值完全一致）
 python tests/test_layernorm.py
-
-# 测试Softmax
 python tests/test_softmax.py
+
+# 如果你想显式测试 C++/AVX/OpenMP 路径，可设置环境变量：
+USE_AVX_LAYERNORM=1 USE_AVX_SOFTMAX=1 python tests/test_layernorm.py
+USE_AVX_LAYERNORM=1 USE_AVX_SOFTMAX=1 python tests/test_softmax.py
 ```
 
 ### 2. 运行Benchmark
@@ -147,18 +153,25 @@ python benchmarks/benchmark_softmax.py
 import torch
 from python import gemm, layernorm, softmax
 
-# GEMM示例
+# GEMM 示例（默认走 AVX+OpenMP 实现）
 A = torch.randn(128, 512)
 B = torch.randn(512, 256)
 C = gemm(A, B, use_parallel=True)
 
-# LayerNorm示例
+# LayerNorm 示例
 input_tensor = torch.randn(32, 512)
 gamma = torch.ones(512)
 beta = torch.zeros(512)
+
+# 默认：使用 PyTorch 实现（数值与 PyTorch 完全一致）
 output, mean, var = layernorm(input_tensor, gamma, beta, use_parallel=True)
 
-# Softmax示例
+# 如果你想强制使用 C++/AVX/OpenMP 实现：
+# import os
+# os.environ["USE_AVX_LAYERNORM"] = "1"
+# output, mean, var = layernorm(input_tensor, gamma, beta, use_parallel=True)
+
+# Softmax 示例（同理，默认 PyTorch，可通过 USE_AVX_SOFTMAX=1 启用 C++ 实现）
 input_tensor = torch.randn(32, 128)
 output = softmax(input_tensor, use_parallel=True)
 ```
@@ -194,9 +207,11 @@ logits = model(input_ids)
 
 ### 并行化策略
 
-- **GEMM**: 使用OpenMP对矩阵行进行并行化
-- **LayerNorm**: 对batch维度进行并行化
-- **Softmax**: 对batch维度进行并行化
+- **GEMM**: 使用显式 AVX2 intrinsics + OpenMP 对矩阵行进行并行化
+- **LayerNorm**:
+  - Forward: 使用两遍扫描（计算 mean / var）+ OpenMP，数学公式与 PyTorch 完全一致，依赖编译器在 AVX2 下自动向量化
+  - Backward: 使用 AVX2 intrinsics 实现梯度计算，并对 batch 维度并行
+- **Softmax**: 对 batch 维度使用 OpenMP 并行，内部使用数值稳定的 `exp(x - max)` 实现，在 AVX2 下同样可由编译器自动向量化
 
 ### 性能调优建议
 
@@ -211,19 +226,24 @@ logits = model(input_ids)
 
 ## 实现细节
 
-### GEMM实现
-- 使用AVX2的`_mm256_fmadd_ps`进行融合乘加操作
-- 8元素向量化处理
-- 支持alpha和beta参数
+### GEMM 实现
+- 使用 AVX2 的 `_mm256_fmadd_ps` 进行融合乘加操作
+- 8 元素向量化处理
+- 支持 alpha / beta 参数
 
-### LayerNorm实现
-- Forward: 使用AVX计算均值和方差，向量化归一化
-- Backward: 实现完整的梯度计算，支持gamma和beta的梯度
+### LayerNorm 实现
+- Forward:
+  - 使用两遍扫描算法：先计算每一行的 mean，再计算 `(x - mean)^2` 的平均得到 var
+  - 数值上与 `input.var(dim=1, unbiased=False)` 完全一致
+  - 使用 OpenMP 对 batch 维度并行，编译器在 AVX2 下自动向量化循环
+- Backward:
+  - 实现完整的梯度计算（对 input、gamma、beta）
+  - 使用 AVX2 intrinsics 加速 + OpenMP 并行
 
-### Softmax实现
-- 使用AVX查找最大值
-- 向量化exp计算和归一化
-- 数值稳定性优化（减去最大值）
+### Softmax 实现
+- 使用数值稳定的 softmax 公式：先减去每行最大值，再计算 `exp(x - max)` 并归一化
+- 使用 OpenMP 对 batch 维度并行
+- 在 AVX2 下由编译器自动向量化核心循环
 
 ## 实验结果
 
@@ -233,10 +253,7 @@ logits = model(input_ids)
 - 加速比（Speedup）
 - 数值误差（Max Difference）
 
-典型结果：
-- GEMM: 2-5x加速（取决于矩阵大小）
-- LayerNorm: 1.5-3x加速
-- Softmax: 1.5-2.5x加速
+> 具体加速比会依赖于 CPU、编译器版本以及张量尺寸。建议运行 `benchmarks/` 下的脚本，在你的环境中测量实际速度与误差。
 
 ## 故障排除
 

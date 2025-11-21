@@ -4,25 +4,28 @@
 #include <cmath>
 #include <cstring>
 
-// Scalar forward
+// Scalar forward - Two-pass algorithm for better numerical stability
 void layernorm_forward_scalar(
     const float* input, const float* gamma, const float* beta,
     float* output, float* mean, float* var,
     int64_t N, int64_t hidden_size, float eps
 ) {
     for (int64_t i = 0; i < N; ++i) {
+        // Pass 1: Mean
         float sum = 0.0f;
-        float sum_sq = 0.0f;
-        
         for (int64_t j = 0; j < hidden_size; ++j) {
-            float val = input[i * hidden_size + j];
-            sum += val;
-            sum_sq += val * val;
+            sum += input[i * hidden_size + j];
         }
-        
         float m = sum / hidden_size;
-        float v = (sum_sq / hidden_size) - (m * m);
         mean[i] = m;
+        
+        // Pass 2: Variance and Normalize
+        float sum_sq_diff = 0.0f;
+        for (int64_t j = 0; j < hidden_size; ++j) {
+            float diff = input[i * hidden_size + j] - m;
+            sum_sq_diff += diff * diff;
+        }
+        float v = sum_sq_diff / hidden_size;
         var[i] = v;
         
         float inv_std = 1.0f / std::sqrt(v + eps);
@@ -34,39 +37,47 @@ void layernorm_forward_scalar(
     }
 }
 
-// AVX forward
+// AVX forward - Two-pass algorithm
 void layernorm_forward_avx(
     const float* input, const float* gamma, const float* beta,
     float* output, float* mean, float* var,
     int64_t N, int64_t hidden_size, float eps
 ) {
     for (int64_t i = 0; i < N; ++i) {
+        // Pass 1: Mean
         __m256 sum_vec = _mm256_setzero_ps();
-        __m256 sum_sq_vec = _mm256_setzero_ps();
-        
         int64_t j = 0;
         for (; j + 8 <= hidden_size; j += 8) {
             __m256 x = loadu_8_float(&input[i * hidden_size + j]);
             sum_vec = _mm256_add_ps(sum_vec, x);
-            sum_sq_vec = _mm256_fmadd_ps(x, x, sum_sq_vec);
         }
-        
         float sum = horizontal_sum_8(sum_vec);
-        float sum_sq = horizontal_sum_8(sum_sq_vec);
-        
         for (; j < hidden_size; ++j) {
-            float val = input[i * hidden_size + j];
-            sum += val;
-            sum_sq += val * val;
+            sum += input[i * hidden_size + j];
         }
-        
         float m = sum / hidden_size;
-        float v = (sum_sq / hidden_size) - (m * m);
         mean[i] = m;
+        
+        // Pass 2: Variance
+        __m256 m_vec = _mm256_set1_ps(m);
+        __m256 sum_sq_diff_vec = _mm256_setzero_ps();
+        
+        j = 0;
+        for (; j + 8 <= hidden_size; j += 8) {
+            __m256 x = loadu_8_float(&input[i * hidden_size + j]);
+            __m256 diff = _mm256_sub_ps(x, m_vec);
+            sum_sq_diff_vec = _mm256_fmadd_ps(diff, diff, sum_sq_diff_vec);
+        }
+        float sum_sq_diff = horizontal_sum_8(sum_sq_diff_vec);
+        for (; j < hidden_size; ++j) {
+            float diff = input[i * hidden_size + j] - m;
+            sum_sq_diff += diff * diff;
+        }
+        float v = sum_sq_diff / hidden_size;
         var[i] = v;
         
+        // Normalize and Output
         float inv_std = 1.0f / std::sqrt(v + eps);
-        __m256 mean_vec = _mm256_set1_ps(m);
         __m256 inv_std_vec = _mm256_set1_ps(inv_std);
         
         j = 0;
@@ -75,7 +86,7 @@ void layernorm_forward_avx(
             __m256 g = loadu_8_float(&gamma[j]);
             __m256 b = loadu_8_float(&beta[j]);
             
-            __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(x, mean_vec), inv_std_vec);
+            __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(x, m_vec), inv_std_vec);
             __m256 out = _mm256_fmadd_ps(normalized, g, b);
             storeu_8_float(&output[i * hidden_size + j], out);
         }
@@ -87,7 +98,7 @@ void layernorm_forward_avx(
     }
 }
 
-// AVX parallel forward
+// AVX parallel forward - Two-pass algorithm
 void layernorm_forward_avx_parallel(
     const float* input, const float* gamma, const float* beta,
     float* output, float* mean, float* var,
@@ -100,32 +111,40 @@ void layernorm_forward_avx_parallel(
     
     #pragma omp parallel for
     for (int64_t i = 0; i < N; ++i) {
+        // Pass 1: Mean
         __m256 sum_vec = _mm256_setzero_ps();
-        __m256 sum_sq_vec = _mm256_setzero_ps();
-        
         int64_t j = 0;
         for (; j + 8 <= hidden_size; j += 8) {
             __m256 x = loadu_8_float(&input[i * hidden_size + j]);
             sum_vec = _mm256_add_ps(sum_vec, x);
-            sum_sq_vec = _mm256_fmadd_ps(x, x, sum_sq_vec);
         }
-        
         float sum = horizontal_sum_8(sum_vec);
-        float sum_sq = horizontal_sum_8(sum_sq_vec);
-        
         for (; j < hidden_size; ++j) {
-            float val = input[i * hidden_size + j];
-            sum += val;
-            sum_sq += val * val;
+            sum += input[i * hidden_size + j];
         }
-        
         float m = sum / hidden_size;
-        float v = (sum_sq / hidden_size) - (m * m);
         mean[i] = m;
+        
+        // Pass 2: Variance
+        __m256 m_vec = _mm256_set1_ps(m);
+        __m256 sum_sq_diff_vec = _mm256_setzero_ps();
+        
+        j = 0;
+        for (; j + 8 <= hidden_size; j += 8) {
+            __m256 x = loadu_8_float(&input[i * hidden_size + j]);
+            __m256 diff = _mm256_sub_ps(x, m_vec);
+            sum_sq_diff_vec = _mm256_fmadd_ps(diff, diff, sum_sq_diff_vec);
+        }
+        float sum_sq_diff = horizontal_sum_8(sum_sq_diff_vec);
+        for (; j < hidden_size; ++j) {
+            float diff = input[i * hidden_size + j] - m;
+            sum_sq_diff += diff * diff;
+        }
+        float v = sum_sq_diff / hidden_size;
         var[i] = v;
         
+        // Normalize and Output
         float inv_std = 1.0f / std::sqrt(v + eps);
-        __m256 mean_vec = _mm256_set1_ps(m);
         __m256 inv_std_vec = _mm256_set1_ps(inv_std);
         
         j = 0;
@@ -134,7 +153,7 @@ void layernorm_forward_avx_parallel(
             __m256 g = loadu_8_float(&gamma[j]);
             __m256 b = loadu_8_float(&beta[j]);
             
-            __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(x, mean_vec), inv_std_vec);
+            __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(x, m_vec), inv_std_vec);
             __m256 out = _mm256_fmadd_ps(normalized, g, b);
             storeu_8_float(&output[i * hidden_size + j], out);
         }
@@ -152,21 +171,47 @@ void layernorm_forward(
     int64_t N, int64_t hidden_size, float eps,
     bool use_parallel
 ) {
-    if (has_avx2()) {
-        if (use_parallel) {
-            layernorm_forward_avx_parallel(input, gamma, beta, output, mean, var,
-                                          N, hidden_size, eps, 0);
-        } else {
-            layernorm_forward_avx(input, gamma, beta, output, mean, var,
-                                N, hidden_size, eps);
-        }
-    } else {
+    // 为了数值精度，与PyTorch保持严格一致，这里不再依赖手写AVX归约，
+    // 而是使用标量实现 + OpenMP 并行（编译器仍会在 -mavx2 下自动向量化）。
+    if (!use_parallel) {
         layernorm_forward_scalar(input, gamma, beta, output, mean, var,
-                               N, hidden_size, eps);
+                                 N, hidden_size, eps);
+        return;
+    }
+
+    // 并行版本：按 batch 维度拆分，不共享中间状态，线程安全
+    #pragma omp parallel for
+    for (int64_t i = 0; i < N; ++i) {
+        const int64_t base = i * hidden_size;
+
+        // Pass 1: Mean
+        float sum = 0.0f;
+        for (int64_t j = 0; j < hidden_size; ++j) {
+            sum += input[base + j];
+        }
+        float m = sum / hidden_size;
+        mean[i] = m;
+
+        // Pass 2: Variance
+        float sum_sq_diff = 0.0f;
+        for (int64_t j = 0; j < hidden_size; ++j) {
+            float diff = input[base + j] - m;
+            sum_sq_diff += diff * diff;
+        }
+        float v = sum_sq_diff / hidden_size;
+        var[i] = v;
+
+        float inv_std = 1.0f / std::sqrt(v + eps);
+
+        // Normalize + affine
+        for (int64_t j = 0; j < hidden_size; ++j) {
+            float normalized = (input[base + j] - m) * inv_std;
+            output[base + j] = normalized * gamma[j] + beta[j];
+        }
     }
 }
 
-// Scalar backward
+// Scalar backward - Fixed logic for gradients
 void layernorm_backward_scalar(
     const float* grad_output, const float* input,
     const float* gamma, const float* mean, const float* var,
@@ -185,11 +230,16 @@ void layernorm_backward_scalar(
         float inv_std = 1.0f / std::sqrt(var[i] + eps);
         float inv_hidden_size = 1.0f / hidden_size;
         
-        float sum_grad_norm = 0.0f;
+        float sum_dy = 0.0f;
+        float sum_dy_xhat = 0.0f;
+        
+        // Pass 1: Compute sums
         for (int64_t j = 0; j < hidden_size; ++j) {
             float normalized = (input[i * hidden_size + j] - mean[i]) * inv_std;
-            float grad_norm = grad_output[i * hidden_size + j] * gamma[j];
-            sum_grad_norm += grad_norm;
+            float dy = grad_output[i * hidden_size + j] * gamma[j];
+            
+            sum_dy += dy;
+            sum_dy_xhat += dy * normalized;
             
             if (grad_gamma) {
                 grad_gamma[j] += normalized * grad_output[i * hidden_size + j];
@@ -199,20 +249,19 @@ void layernorm_backward_scalar(
             }
         }
         
+        // Pass 2: Compute grad_input
         for (int64_t j = 0; j < hidden_size; ++j) {
             float normalized = (input[i * hidden_size + j] - mean[i]) * inv_std;
-            float grad_norm = grad_output[i * hidden_size + j] * gamma[j];
+            float dy = grad_output[i * hidden_size + j] * gamma[j];
             
-            float grad_input_val = inv_std * grad_norm;
-            grad_input_val -= inv_hidden_size * sum_grad_norm;
-            grad_input_val -= inv_hidden_size * normalized * sum_grad_norm;
-            
+            // dx = (1/sigma) * (dy - mean(dy) - x_hat * mean(dy * x_hat))
+            float grad_input_val = inv_std * (dy - sum_dy * inv_hidden_size - normalized * sum_dy_xhat * inv_hidden_size);
             grad_input[i * hidden_size + j] = grad_input_val;
         }
     }
 }
 
-// AVX backward (simplified, can be optimized further)
+// AVX backward - Fixed logic for gradients
 void layernorm_backward_avx(
     const float* grad_output, const float* input,
     const float* gamma, const float* mean, const float* var,
@@ -233,31 +282,22 @@ void layernorm_backward_avx(
         __m256 inv_std_vec = _mm256_set1_ps(inv_std);
         __m256 inv_hs_vec = _mm256_set1_ps(inv_hidden_size);
         
-        // Compute sum_grad_norm
-        __m256 sum_grad_norm_vec = _mm256_setzero_ps();
-        int64_t j = 0;
-        for (; j + 8 <= hidden_size; j += 8) {
-            __m256 go = loadu_8_float(&grad_output[i * hidden_size + j]);
-            __m256 g = loadu_8_float(&gamma[j]);
-            sum_grad_norm_vec = _mm256_fmadd_ps(go, g, sum_grad_norm_vec);
-        }
-        float sum_grad_norm = horizontal_sum_8(sum_grad_norm_vec);
-        for (; j < hidden_size; ++j) {
-            sum_grad_norm += grad_output[i * hidden_size + j] * gamma[j];
-        }
-        __m256 sum_gn_vec = _mm256_set1_ps(sum_grad_norm);
+        // Pass 1: Compute sums (sum_dy and sum_dy_xhat)
+        __m256 sum_dy_vec = _mm256_setzero_ps();
+        __m256 sum_dy_xhat_vec = _mm256_setzero_ps();
         
-        // Compute gradients
-        j = 0;
+        int64_t j = 0;
         for (; j + 8 <= hidden_size; j += 8) {
             __m256 x = loadu_8_float(&input[i * hidden_size + j]);
             __m256 go = loadu_8_float(&grad_output[i * hidden_size + j]);
             __m256 g = loadu_8_float(&gamma[j]);
             
             __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(x, mean_vec), inv_std_vec);
-            __m256 grad_norm = _mm256_mul_ps(go, g);
+            __m256 dy = _mm256_mul_ps(go, g);
             
-            // grad_gamma and grad_beta
+            sum_dy_vec = _mm256_add_ps(sum_dy_vec, dy);
+            sum_dy_xhat_vec = _mm256_fmadd_ps(dy, normalized, sum_dy_xhat_vec);
+            
             if (grad_gamma) {
                 __m256 gg = loadu_8_float(&grad_gamma[j]);
                 gg = _mm256_fmadd_ps(normalized, go, gg);
@@ -268,19 +308,17 @@ void layernorm_backward_avx(
                 gb = _mm256_add_ps(gb, go);
                 storeu_8_float(&grad_beta[j], gb);
             }
-            
-            // grad_input
-            __m256 gi = _mm256_mul_ps(inv_std_vec, grad_norm);
-            gi = _mm256_fnmadd_ps(inv_hs_vec, sum_gn_vec, gi);
-            __m256 norm_sum = _mm256_mul_ps(normalized, sum_gn_vec);
-            gi = _mm256_fnmadd_ps(inv_hs_vec, norm_sum, gi);
-            storeu_8_float(&grad_input[i * hidden_size + j], gi);
         }
         
-        // Handle remainder
+        float sum_dy = horizontal_sum_8(sum_dy_vec);
+        float sum_dy_xhat = horizontal_sum_8(sum_dy_xhat_vec);
+        
         for (; j < hidden_size; ++j) {
             float normalized = (input[i * hidden_size + j] - mean[i]) * inv_std;
-            float grad_norm = grad_output[i * hidden_size + j] * gamma[j];
+            float dy = grad_output[i * hidden_size + j] * gamma[j];
+            
+            sum_dy += dy;
+            sum_dy_xhat += dy * normalized;
             
             if (grad_gamma) {
                 grad_gamma[j] += normalized * grad_output[i * hidden_size + j];
@@ -288,10 +326,35 @@ void layernorm_backward_avx(
             if (grad_beta) {
                 grad_beta[j] += grad_output[i * hidden_size + j];
             }
+        }
+        
+        __m256 mean_dy_vec = _mm256_set1_ps(sum_dy * inv_hidden_size);
+        __m256 mean_dy_xhat_vec = _mm256_set1_ps(sum_dy_xhat * inv_hidden_size);
+        
+        // Pass 2: Compute grad_input
+        j = 0;
+        for (; j + 8 <= hidden_size; j += 8) {
+            __m256 x = loadu_8_float(&input[i * hidden_size + j]);
+            __m256 go = loadu_8_float(&grad_output[i * hidden_size + j]);
+            __m256 g = loadu_8_float(&gamma[j]);
             
-            float grad_input_val = inv_std * grad_norm;
-            grad_input_val -= inv_hidden_size * sum_grad_norm;
-            grad_input_val -= inv_hidden_size * normalized * sum_grad_norm;
+            __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(x, mean_vec), inv_std_vec);
+            __m256 dy = _mm256_mul_ps(go, g);
+            
+            // grad = inv_std * (dy - mean_dy - normalized * mean_dy_xhat)
+            __m256 term2 = _mm256_mul_ps(normalized, mean_dy_xhat_vec);
+            __m256 inside = _mm256_sub_ps(dy, mean_dy_vec);
+            inside = _mm256_sub_ps(inside, term2);
+            __m256 gi = _mm256_mul_ps(inv_std_vec, inside);
+            
+            storeu_8_float(&grad_input[i * hidden_size + j], gi);
+        }
+        
+        for (; j < hidden_size; ++j) {
+            float normalized = (input[i * hidden_size + j] - mean[i]) * inv_std;
+            float dy = grad_output[i * hidden_size + j] * gamma[j];
+            
+            float grad_input_val = inv_std * (dy - sum_dy * inv_hidden_size - normalized * sum_dy_xhat * inv_hidden_size);
             grad_input[i * hidden_size + j] = grad_input_val;
         }
     }
@@ -323,27 +386,21 @@ void layernorm_backward_avx_parallel(
         __m256 inv_std_vec = _mm256_set1_ps(inv_std);
         __m256 inv_hs_vec = _mm256_set1_ps(inv_hidden_size);
         
-        __m256 sum_grad_norm_vec = _mm256_setzero_ps();
-        int64_t j = 0;
-        for (; j + 8 <= hidden_size; j += 8) {
-            __m256 go = loadu_8_float(&grad_output[i * hidden_size + j]);
-            __m256 g = loadu_8_float(&gamma[j]);
-            sum_grad_norm_vec = _mm256_fmadd_ps(go, g, sum_grad_norm_vec);
-        }
-        float sum_grad_norm = horizontal_sum_8(sum_grad_norm_vec);
-        for (; j < hidden_size; ++j) {
-            sum_grad_norm += grad_output[i * hidden_size + j] * gamma[j];
-        }
-        __m256 sum_gn_vec = _mm256_set1_ps(sum_grad_norm);
+        // Pass 1
+        __m256 sum_dy_vec = _mm256_setzero_ps();
+        __m256 sum_dy_xhat_vec = _mm256_setzero_ps();
         
-        j = 0;
+        int64_t j = 0;
         for (; j + 8 <= hidden_size; j += 8) {
             __m256 x = loadu_8_float(&input[i * hidden_size + j]);
             __m256 go = loadu_8_float(&grad_output[i * hidden_size + j]);
             __m256 g = loadu_8_float(&gamma[j]);
             
             __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(x, mean_vec), inv_std_vec);
-            __m256 grad_norm = _mm256_mul_ps(go, g);
+            __m256 dy = _mm256_mul_ps(go, g);
+            
+            sum_dy_vec = _mm256_add_ps(sum_dy_vec, dy);
+            sum_dy_xhat_vec = _mm256_fmadd_ps(dy, normalized, sum_dy_xhat_vec);
             
             #pragma omp critical
             {
@@ -358,17 +415,17 @@ void layernorm_backward_avx_parallel(
                     storeu_8_float(&grad_beta[j], gb);
                 }
             }
-            
-            __m256 gi = _mm256_mul_ps(inv_std_vec, grad_norm);
-            gi = _mm256_fnmadd_ps(inv_hs_vec, sum_gn_vec, gi);
-            __m256 norm_sum = _mm256_mul_ps(normalized, sum_gn_vec);
-            gi = _mm256_fnmadd_ps(inv_hs_vec, norm_sum, gi);
-            storeu_8_float(&grad_input[i * hidden_size + j], gi);
         }
+        
+        float sum_dy = horizontal_sum_8(sum_dy_vec);
+        float sum_dy_xhat = horizontal_sum_8(sum_dy_xhat_vec);
         
         for (; j < hidden_size; ++j) {
             float normalized = (input[i * hidden_size + j] - mean[i]) * inv_std;
-            float grad_norm = grad_output[i * hidden_size + j] * gamma[j];
+            float dy = grad_output[i * hidden_size + j] * gamma[j];
+            
+            sum_dy += dy;
+            sum_dy_xhat += dy * normalized;
             
             #pragma omp critical
             {
@@ -379,10 +436,34 @@ void layernorm_backward_avx_parallel(
                     grad_beta[j] += grad_output[i * hidden_size + j];
                 }
             }
+        }
+        
+        __m256 mean_dy_vec = _mm256_set1_ps(sum_dy * inv_hidden_size);
+        __m256 mean_dy_xhat_vec = _mm256_set1_ps(sum_dy_xhat * inv_hidden_size);
+        
+        // Pass 2
+        j = 0;
+        for (; j + 8 <= hidden_size; j += 8) {
+            __m256 x = loadu_8_float(&input[i * hidden_size + j]);
+            __m256 go = loadu_8_float(&grad_output[i * hidden_size + j]);
+            __m256 g = loadu_8_float(&gamma[j]);
             
-            float grad_input_val = inv_std * grad_norm;
-            grad_input_val -= inv_hidden_size * sum_grad_norm;
-            grad_input_val -= inv_hidden_size * normalized * sum_grad_norm;
+            __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(x, mean_vec), inv_std_vec);
+            __m256 dy = _mm256_mul_ps(go, g);
+            
+            __m256 term2 = _mm256_mul_ps(normalized, mean_dy_xhat_vec);
+            __m256 inside = _mm256_sub_ps(dy, mean_dy_vec);
+            inside = _mm256_sub_ps(inside, term2);
+            __m256 gi = _mm256_mul_ps(inv_std_vec, inside);
+            
+            storeu_8_float(&grad_input[i * hidden_size + j], gi);
+        }
+        
+        for (; j < hidden_size; ++j) {
+            float normalized = (input[i * hidden_size + j] - mean[i]) * inv_std;
+            float dy = grad_output[i * hidden_size + j] * gamma[j];
+            
+            float grad_input_val = inv_std * (dy - sum_dy * inv_hidden_size - normalized * sum_dy_xhat * inv_hidden_size);
             grad_input[i * hidden_size + j] = grad_input_val;
         }
     }
@@ -411,4 +492,3 @@ void layernorm_backward(
                                 N, hidden_size, eps);
     }
 }
-

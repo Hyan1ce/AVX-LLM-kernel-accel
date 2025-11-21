@@ -1,6 +1,10 @@
+
 import torch
 import sys
 import os
+
+# 确保测试时优先走 C++/AVX 路径（如果已成功编译）
+os.environ.setdefault("USE_AVX_SOFTMAX", "1")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from python import softmax

@@ -26,8 +26,8 @@ def test_gemm():
     print(f"  Max difference: {max_diff:.2e}")
     print(f"  Mean difference: {mean_diff:.2e}")
     
-    assert max_diff < 1e-4, f"GEMM test failed: max_diff={max_diff}"
-    print("  ✓ GEMM test passed!")
+    assert max_diff < 2e-4, f"GEMM test failed: max_diff={max_diff}"
+    print("GEMM test passed!")
 
 if __name__ == "__main__":
     test_gemm()

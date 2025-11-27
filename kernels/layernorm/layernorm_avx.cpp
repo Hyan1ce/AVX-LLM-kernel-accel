@@ -179,6 +179,16 @@ void layernorm_forward(
         return;
     }
 
+    // 自适应选择：小任务时使用串行避免OpenMP开销
+    // 每个任务处理一行，工作量 = N * hidden_size
+    // 阈值：当总工作量 < 64K元素时使用串行（避免线程创建开销）
+    int64_t total_elements = N * hidden_size;
+    if (total_elements < 64 * 1024) {
+        layernorm_forward_scalar(input, gamma, beta, output, mean, var,
+                                 N, hidden_size, eps);
+        return;
+    }
+
     // 并行版本：按 batch 维度拆分，不共享中间状态，线程安全
     #pragma omp parallel for
     for (int64_t i = 0; i < N; ++i) {
@@ -280,7 +290,6 @@ void layernorm_backward_avx(
         float inv_hidden_size = 1.0f / hidden_size;
         __m256 mean_vec = _mm256_set1_ps(mean[i]);
         __m256 inv_std_vec = _mm256_set1_ps(inv_std);
-        __m256 inv_hs_vec = _mm256_set1_ps(inv_hidden_size);
         
         // Pass 1: Compute sums (sum_dy and sum_dy_xhat)
         __m256 sum_dy_vec = _mm256_setzero_ps();
@@ -384,7 +393,6 @@ void layernorm_backward_avx_parallel(
         float inv_hidden_size = 1.0f / hidden_size;
         __m256 mean_vec = _mm256_set1_ps(mean[i]);
         __m256 inv_std_vec = _mm256_set1_ps(inv_std);
-        __m256 inv_hs_vec = _mm256_set1_ps(inv_hidden_size);
         
         // Pass 1
         __m256 sum_dy_vec = _mm256_setzero_ps();
@@ -476,8 +484,12 @@ void layernorm_backward(
     int64_t N, int64_t hidden_size, float eps,
     bool use_parallel
 ) {
+    // 自适应选择：小任务时避免并行开销
+    int64_t total_elements = N * hidden_size;
+    bool should_parallel = use_parallel && (total_elements >= 64 * 1024);
+    
     if (has_avx2()) {
-        if (use_parallel) {
+        if (should_parallel) {
             layernorm_backward_avx_parallel(grad_output, input, gamma, mean, var,
                                            grad_input, grad_gamma, grad_beta,
                                            N, hidden_size, eps, 0);

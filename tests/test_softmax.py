@@ -30,7 +30,7 @@ def test_softmax():
     print(f"  Mean difference: {mean_diff:.2e}")
     
     assert max_diff < 1e-4, f"Softmax test failed: max_diff={max_diff}"
-    print("  ✓ Softmax test passed!")
+    print("Softmax test passed!")
 
 if __name__ == "__main__":
     test_softmax()

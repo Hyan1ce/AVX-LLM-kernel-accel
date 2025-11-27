@@ -148,4 +148,3 @@ PYBIND11_MODULE(avx_kernels_cpp, m) {
     m.def("softmax_forward", &softmax_avx_forward, "Softmax AVX forward",
           py::arg("input"), py::arg("use_parallel") = true);
 }
-

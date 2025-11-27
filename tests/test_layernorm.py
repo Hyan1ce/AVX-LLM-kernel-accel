@@ -42,7 +42,7 @@ def test_layernorm():
     print(f"First element AVX:   {result_avx[0,0].item():.4f}")
     
     assert max_diff < 1e-4, f"LayerNorm test failed: max_diff={max_diff}"
-    print("  ✓ LayerNorm test passed!")
+    print("LayerNorm test passed!")
 
 if __name__ == "__main__":
     test_layernorm()

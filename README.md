@@ -45,7 +45,7 @@ AVX-LLM-kernel-accel/
 │   ├── benchmark_layernorm.py
 │   └── benchmark_softmax.py
 │
-├── tests/                    # 正确性测试
+├── tests/                    # 正确性测试，AVX版本与PyTorch版本结果在一定范围内视为通过测试
 │   ├── test_gemm.py
 │   ├── test_layernorm.py
 │   └── test_softmax.py

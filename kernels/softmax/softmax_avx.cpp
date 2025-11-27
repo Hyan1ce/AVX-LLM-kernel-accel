@@ -44,6 +44,15 @@ void softmax_forward(
         return;
     }
 
+    // 自适应选择：小任务时使用串行避免OpenMP开销
+    // 每个任务处理一行，工作量 = N * seq_len
+    // 阈值：当总工作量 < 64K元素时使用串行
+    int64_t total_elements = N * seq_len;
+    if (total_elements < 64 * 1024) {
+        softmax_forward_scalar(input, output, N, seq_len);
+        return;
+    }
+
     #pragma omp parallel for
     for (int64_t i = 0; i < N; ++i) {
         const float* row_input = &input[i * seq_len];

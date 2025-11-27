@@ -43,6 +43,8 @@ ext_modules = [
             '-fopenmp',
             '-Wall',
             '-Wextra',
+            '-Wno-unused-parameter',  # Suppress unused parameter warnings from PyTorch headers
+            '-Wno-deprecated-declarations',  # Suppress deprecated warnings
             f'-D_GLIBCXX_USE_CXX11_ABI={1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0}',
         ],
         extra_link_args=[
